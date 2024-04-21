@@ -1,0 +1,5 @@
+
+AuthName "game"
+AuthType Basic
+AuthUserFile /home/kirill/projects/game//html/ops/.htpasswd
+require valid-user

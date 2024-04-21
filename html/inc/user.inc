@@ -1,0 +1,927 @@
+<?php
+// This file is part of BOINC.
+// http://boinc.berkeley.edu
+// Copyright (C) 2008 University of California
+//
+// BOINC is free software; you can redistribute it and/or modify it
+// under the terms of the GNU Lesser General Public License
+// as published by the Free Software Foundation,
+// either version 3 of the License, or (at your option) any later version.
+//
+// BOINC is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+// See the GNU Lesser General Public License for more details.
+//
+// You should have received a copy of the GNU Lesser General Public License
+// along with BOINC.  If not, see <http://www.gnu.org/licenses/>.
+
+require_once("../inc/credit.inc");
+require_once("../inc/email.inc");
+require_once("../inc/util.inc");
+require_once("../inc/team.inc");
+require_once("../inc/friend.inc");
+require_once("../inc/forum_db.inc");
+require_once("../inc/notify.inc");
+require_once("../inc/ldap.inc");
+
+
+if (!defined('REMOTE_PROJECTS_TTL')) {
+    define('REMOTE_PROJECTS_TTL', 86400);
+}
+
+$servername = "localhost:3306"; // Имя сервера базы данных (обычно "localhost")
+$username = "kirill"; // Имя пользователя базы данных
+$password = "Kirill15"; // Пароль пользователя базы данных
+$dbname = "game"; // Имя базы данных
+
+
+// add an element "projects" to user consisting of array of projects
+// they've participated in
+//
+function get_other_projects($user) {
+    $cpid = md5($user->cross_project_id . $user->email_addr);
+    $url = "http://boinc.netsoft-online.com/get_user.php?cpid=".$cpid;
+
+    // Check the cache for that URL
+    //
+    $cacheddata = get_cached_data(REMOTE_PROJECTS_TTL, $url);
+    if ($cacheddata) {
+        $remote = unserialize($cacheddata);
+        if (!$remote) $remote = [];
+    } else {
+        // Fetch the XML, use curl if fopen() is disallowed
+        //
+        if (ini_get('allow_url_fopen')) {
+            $timeout = 3;
+            $old_timeout = ini_set('default_socket_timeout', $timeout);
+            $xml_object = null;
+            $f = @file_get_contents($url);
+            if ($f) {
+                $xml_object = @simplexml_load_string($f);
+            }
+            ini_set('default_socket_timeout', $old_timeout);
+            if (!$xml_object) {
+                return $user;
+            }
+        } else {
+            $ch = curl_init($url);
+            curl_setopt($ch, CURLOPT_HEADER, false);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+            curl_setopt($ch, CURLOPT_MAXREDIRS, 3);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 3);
+            $rawxml = @curl_exec($ch);
+            $xml_object = null;
+            if ($rawxml) {
+                $xml_object = @simplexml_load_string($rawxml);
+            }
+            curl_close($ch);
+            if (!$xml_object) {
+                return $user;
+            }
+        }
+
+        // auto-cast the project list to an array of stdClass projects
+        //
+        $remote = @json_decode(json_encode((array)$xml_object))->project;
+        if (!$remote) $remote = [];
+        if (!is_array($remote)) {
+            $remote = [$remote];
+        }
+
+        // Cache the results
+        set_cached_data(REMOTE_PROJECTS_TTL, serialize($remote), $url);
+    }
+    $user->projects = $remote;
+    return $user;
+}
+
+function show_project($project) {
+    if ($project->url == "http://www.worldcommunitygrid.org/") {
+        $x = $project->name;
+    } else {
+        $x = "<a href=\"$project->url"."show_user.php?userid=$project->id\">$project->name</a>";
+    }
+    echo "<tr>
+        <td>$x</td>
+        <td align=\"right\">".number_format($project->total_credit, 0)."</td>
+        <td align=\"right\">".number_format($project->expavg_credit, 0)."</td>
+        <td align=\"right\">".date_str($project->create_time)."</td>
+        </tr>
+    ";
+}
+
+function cmp($a, $b) {
+    if ($a->expavg_credit == $b->expavg_credit) return 0;
+    return ($a->expavg_credit < $b->expavg_credit) ? 1 : -1;
+}
+
+function show_other_projects($user, $personal) {
+    if (!isset($user->projects)) return;
+    if (count($user->projects) < 2) return;
+
+    usort($user->projects, "cmp");
+    if ($personal) {
+        echo "<h3>".tra("Projects in which you are participating")."</h3>";
+    } else {
+        echo "<h3>".tra("Projects in which %1 is participating", $user->name)."</h3>";
+    }
+    start_table('table-striped');
+    row_heading_array(
+        array(
+            tra("Project")."<br/><small>".tra("Click for user page")."</small>",
+            tra("Total credit"),
+            tra("Average credit"),
+            tra("Since")
+        ),
+        array("", ALIGN_RIGHT, ALIGN_RIGHT, ALIGN_RIGHT)
+    );
+    foreach ($user->projects as $project) {
+        show_project($project);
+    }
+    end_table();
+}
+
+function total_posts($user) {
+    return BoincPost::count("user=$user->id");
+}
+
+function show_credit($user) {
+    row2(tra("Total credit"), format_credit_large($user->total_credit));
+    $servername = "localhost"; // Имя сервера базы данных (обычно "localhost")
+    $username = "kirill"; // Имя пользователя базы данных
+    $password = "Kirill15"; // Пароль пользователя базы данных
+    $dbname = "game"; // Имя базы данных
+    //$DbConn = new DbConn();
+    //$mysqli = $DbConn->init_conn("kirill","Kirill15","localhost","game","");
+    // Создаем подключение
+    $mysqli = new mysqli($servername, $username, $password, $dbname);
+    $user_id = $user->id;
+    $query = "SELECT id FROM game.user where ID=$user_id;";
+    $result = mysqli_query($mysqli,$query);    
+    WHILE ($row = $result->fetch_assoc()){
+        $id = $row["id"];
+    
+    }
+    //row2(tra("Recent average credit"), $result);
+    //row2(tra("Recent average credit"), var_dump($result));
+    row2(tra("Recent average credit"), $id);
+    //row2(tra("Recent average credit"), format_credit($user->expavg_credit));
+    if (function_exists("project_user_credit")) {
+        project_user_credit($user);
+    }
+}
+
+require_once("../inc/stats_sites.inc");
+// show dynamic user info (private)
+//
+function show_user_stats_private($user) {
+    global $cpid_stats_sites;
+
+    if (NO_COMPUTING && NO_STATS && NO_HOSTS) {
+        return;
+    }
+    row1(tra("Computing"));
+
+    if (!NO_STATS) {
+        show_credit($user);
+    }
+
+    if (!NO_HOSTS) {
+        row2(tra("Computers on this account"), "<a href=\"hosts_user.php\">".tra("View")."</a>");
+    }
+    if (!NO_COMPUTING) {
+        row2(tra("Tasks"), "<a href=\"results.php?userid=$user->id\">".tra("View")."</a>");
+    }
+
+    if (!NO_STATS) {
+        $cpid = md5($user->cross_project_id . $user->email_addr);
+        $x = "";
+        shuffle($cpid_stats_sites);
+        foreach ($cpid_stats_sites as $site) {
+            $name = $site[0];
+            $y = sprintf($site[1], $cpid);
+            $x .= "<a href=\"$y\">$name</a><br/>\n";
+        }
+        $x .= "<br/><small>".tra("Cross-project ID").": $cpid</small>\n";
+        row2(tra("Cross-project statistics"), $x);
+        $x = sprintf('<a href="%s">%s</a>', cert_filename(), tra("Account"));
+        if ($user->teamid) {
+            $x .= ' &middot; <a href="cert_team.php">'.tra("Team").'</a>';
+        }
+        $x .= ' &middot; <a href="cert_all.php">'.tra("Cross-project").'</a>';
+        row2(tra("Certificate"), $x);
+        row2(tra("Stats on your cell phone"), url_base()."userw.php?id=$user->id");
+    }
+}
+
+function notify_description($notify) {
+    switch ($notify->type) {
+    case NOTIFY_FRIEND_REQ:
+        return friend_notify_req_web_line($notify);
+    case NOTIFY_FRIEND_ACCEPT:
+        return friend_notify_accept_web_line($notify);
+    case NOTIFY_PM:
+        return pm_web_line($notify);
+    case NOTIFY_SUBSCRIBED_POST:
+        return subscribed_post_web_line($notify);
+    }
+    return null;
+}
+
+function weak_auth($user) {
+    $x = md5($user->authenticator.$user->passwd_hash);
+    return "{$user->id}_$x";
+}
+
+// originally user URLs were assumed to be http://,
+// and this prefix wasn't stored.
+// Now the prefix can be http:// or https://.
+// This function takes a user URL in any form and converts
+// it to a canonical form, with the protocol prefix.
+//
+function normalize_user_url($url) {
+    $x = strtolower($url);
+    if (substr($x, 0, 7) == 'http://') {
+        return 'http://'.substr($url, 7);
+    }
+    if (substr($x, 0, 8) == 'https://') {
+        return 'https://'.substr($url, 8);
+    }
+    return 'http://'.$url;
+}
+
+// show static user info (private)
+//
+function show_user_info_private($user) {
+    row2(tra("Name"), $user->name);
+    if (LDAP_HOST && is_ldap_email($user->email_addr)) {
+        row2("LDAP ID", ldap_email_to_uid($user->email_addr));
+    } else {
+        $email_text = $user->email_addr;
+        if (defined("SHOW_NONVALIDATED_EMAIL_ADDR") && !$user->email_validated) {
+            $email_text .= " (<a href=validate_email_addr.php>must be validated</a>)";
+        }
+        row2(tra("Email address"), $email_text);
+    }
+    if (USER_URL) {
+        if ($user->url) {
+            $u = normalize_user_url($user->url);
+            row2(tra("URL"), sprintf('<a href="%s">%s</a>', $u, $u));
+        }
+    }
+    if (USER_COUNTRY) {
+        row2(tra("Country"), $user->country);
+    }
+    if (POSTAL_CODE) {
+        row2(tra("Postal code"), $user->postal_code);
+    }
+    row2(tra("%1 member since", PROJECT), date_str($user->create_time));
+    $url_tokens = url_tokens($user->authenticator);
+    if (LDAP_HOST && is_ldap_email($user->email_addr)) {
+        // LDAP accounts can't change email or password
+        //
+        row2(tra("Change"),
+            "<a href=\"edit_user_info_form.php?$url_tokens\">Account info</a>"
+        );
+    } else {
+        $delete_account_str = "";
+        $config = get_config();
+        if (parse_bool($config, "enable_delete_account")) {
+            $delete_account_str = " &middot; <a href=\"delete_account_request.php\">".tra("delete account")."</a>";
+        }
+
+        row2(tra("Change"),
+            "<a href=\"edit_email_form.php\">".tra("email address")."</a>
+            &middot; <a href=\"".secure_url_base()."/edit_passwd_form.php\">".tra("password")."</a>
+            &middot; <a href=\"edit_user_info_form.php?$url_tokens\">".tra("other account info")."</a>"
+            .$delete_account_str
+        );
+    }
+    row2(tra("User ID")."<br/><p class=\"small\">".tra("Used in community functions")."</p>", $user->id);
+    if (!NO_COMPUTING) {
+        row2(
+            tra("Account keys"),
+            "<a href=\"weak_auth.php\">".tra("View")."</a>"
+        );
+
+        require_once("../inc/account_ownership.inc");
+        if (file_exists($account_ownership_private_key_file_path)) {
+          // If the server has keys configured show the account ownership form
+          row2(
+              tra("Account Ownership"),
+              "<a href=\"account_ownership.php?$url_tokens\">Generate ownership proof</a>"
+          );
+        }
+
+    }
+}
+
+function show_preference_links() {
+    row1("<a name=\"prefs\"></a>".tra("Preferences"));
+    if (!NO_GLOBAL_PREFS) {
+        row2(
+            tra("When and how BOINC uses your computer"),
+            "<a href=\"prefs.php?subset=global\">".tra("Computing preferences")."</a>"
+        );
+    }
+    row2(tra("Message boards and private messages"),
+        "<a href=\"edit_forum_preferences_form.php\">".tra("Community preferences")."</a>"
+    );
+    if (!NO_COMPUTING) {
+        row2(tra("Preferences for this project"),
+            "<a href=\"prefs.php?subset=project\">".tra("%1 preferences", PROJECT)."</a>"
+        );
+    }
+}
+
+function friend_links($user) {
+    if (is_banished($user)) {
+        return "";
+    }
+    $x = "<table height=\"100\" width=\"150\" border=\"0\" cellpadding=\"4\"><tr><td class=\"friend\">";
+    if ($user->has_profile) {
+        $profile = BoincProfile::lookup_fields("has_picture", "userid=$user->id");
+        if ($profile && $profile->has_picture) {
+            $img_url = profile_thumb_url($user->id);
+        } else {
+            $img_url = url_base()."img/head_20.png";
+        }
+        $title = tra("View the profile of %1", $user->name);
+        $alt = tra("Profile");
+        $x .= ' <a href="'.url_base().'view_profile.php?userid='.$user->id.'"><img title="'.$title.'" src="'.$img_url.'" alt="'.$alt.'"></a><br>';
+    }
+    $x .= " <a href=\"".url_base()."show_user.php?userid=".$user->id."\">".$user->name."</a>";
+    if (function_exists("project_user_links")) {
+        $x .= project_user_links($user);
+    }
+    $x .= "</td></tr></table>\n";
+    return $x;
+}
+
+// show user name, with links to profile if present.
+// if $badge_height is > 0, show badges
+// if $name_limit, limit name to N chars
+//
+function user_links($user, $badge_height=0, $name_limit=0) {
+    BoincForumPrefs::lookup($user);
+    if (is_banished($user)) {
+        return "(banished: ID $user->id)";
+    }
+    $x = "";
+    if ($user->has_profile) {
+        $img_url = url_base()."img/head_20.png";
+        $x .= ' <a href="'.url_base().'view_profile.php?userid='.$user->id.'"><img title="View the profile of '.$user->name.'" src="'.$img_url.'" alt="Profile"></a>';
+    }
+    $name = $user->name;
+    if ($name_limit && strlen($name) > $name_limit) {
+        $name = substr($name, 0, $name_limit)."...";
+    }
+    $x .= " <a href=\"".url_base()."show_user.php?userid=".$user->id."\">".$name."</a>";
+    if (function_exists("project_user_links")){
+        $x .= project_user_links($user);
+    }
+    if ($badge_height) {
+        $x .= badges_string(true, $user, $badge_height);
+    }
+    return $name_limit?"<nobr>$x</nobr>":$x;
+}
+
+function show_community_private($user) {
+    show_badges_row(true, $user);
+    if (!DISABLE_PROFILES) {
+        if ($user->has_profile) {
+            $x = "<a href=\"view_profile.php?userid=$user->id\">".tra("View")."</a> &middot; <a href=\"delete_profile.php\">".tra("Delete")."</a>";
+        } else {
+            $x = "<a href=\"create_profile.php\">".tra("Create")."</a>";
+        }
+        row2(tra("Profile"), $x);
+    }
+    if (!DISABLE_FORUMS) {
+        $tot = total_posts($user);
+        if ($tot) {
+            row2(tra("Message boards"), "<a href=\"".url_base()."forum_user_posts.php?userid=$user->id\">".tra("%1 posts", $tot)."</a>");
+        }
+    }
+
+    row2(tra("Private messages"), pm_notification($user).pm_email_remind($user));
+
+    $notifies = BoincNotify::enum("userid=$user->id");
+    if (count($notifies)) {
+        $x = "";
+        foreach ($notifies as $notify) {
+            $y = notify_description($notify);
+            if ($y) {
+                $x .= "&bull; $y<br>";
+            } else {
+                $notify->delete();
+            }
+        }
+        $x .= "<a href=\"".notify_rss_url($user)."\"><img vspace=\"4\" border=\"0\" src=\"img/rss_icon.gif\" alt=\"RSS\" /></a>";
+        row2(tra("Notifications"), $x);
+    }
+
+    if (!DISABLE_TEAMS) {
+        if ($user->teamid && ($team = BoincTeam::lookup_id($user->teamid))) {
+            $x = "<a href=\"team_display.php?teamid=$team->id\">$team->name</a>
+                &middot; <a href=\"team_quit_form.php\">".tra("Quit team")."</a>";
+            if (is_team_admin($user, $team)) {
+                $x .= " &middot; <a href=\"team_manage.php?teamid=$user->teamid\">".tra("Administer")."</a>";
+            }
+
+            // if there's a foundership request, notify the founder
+            //
+            if ($user->id==$team->userid && $team->ping_user >0) {
+                $x .= "<p class=\"text-danger\">".tra("(foundership change request pending)")."</p>";
+            }
+            row2(tra("Member of team"), $x);
+        } else {
+            row2(tra("Team"), tra("None")." &middot; <a href=\"team_search.php\">".tra("find a team")."</a>");
+        }
+
+        $teams_founded = BoincTeam::enum("userid=$user->id");
+        foreach ($teams_founded as $team) {
+            if ($team->id != $user->teamid) {
+                $x = "<a href=\"team_display.php?teamid=$team->id\">$team->name</a>";
+                $x .= " | <a href=\"team_manage.php?teamid=".$team->id."\">".tra("Administer")."</a>";
+                if ($team->ping_user > 0) {
+                    $x .= "<p class=\"text-danger\">".tra("(foundership change request pending)")."</span>";
+                }
+                row2(tra("Founder but not member of"), $x);
+            }
+        }
+    }
+
+    $friends = BoincFriend::enum("user_src=$user->id and reciprocated=1");
+    $x = "<a href=\"user_search.php\">".tra("Find friends")."</a><br/>\n";
+    $n = count($friends);
+    if ($n) {
+        foreach($friends as $friend) {
+            $fuser = BoincUser::lookup_id($friend->user_dest);
+            if (!$fuser) continue;
+            $x .= friend_links($fuser);
+        }
+        row2(tra("Friends")." ($n)", $x);
+    } else {
+        row2(tra("Friends"), $x);
+    }
+}
+
+// show summary of dynamic and static info (public)
+//
+function show_user_summary_public($user) {
+    global $g_logged_in_user;
+    row2(tra("User ID"), $user->id);
+    row2(tra("%1 member since", PROJECT), date_str($user->create_time));
+    if (USER_COUNTRY) {
+        row2(tra("Country"), $user->country);
+    }
+    if (USER_URL) {
+        // don't show URL if user has no recent credit (spam suppression)
+        //
+        if ($user->url) {
+            if (!NO_COMPUTING || $user->expavg_credit > 1) {
+                $u = normalize_user_url($user->url);
+                row2(tra("URL"), sprintf('<a href="%s">%s</a>', $u, $u));
+            }
+        }
+    }
+    if (!NO_COMPUTING) {
+        show_credit($user);
+
+        if ($user->show_hosts) {
+            row2(tra("Computers"), "<a href=\"".url_base()."hosts_user.php?userid=$user->id\">".tra("View")."</a>");
+        } else {
+            row2(tra("Computers"), tra("hidden"));
+        }
+    }
+    if (function_exists("project_user_summary_public")) {
+        project_user_summary_public($user);
+    }
+}
+
+// Returns a cacheable community links data object
+// @param user The user to produce a community links object for
+
+function get_community_links_object($user){
+    $cache_object = new StdClass;
+    $cache_object->post_count = total_posts($user);
+    $cache_object->user = $user;
+    $cache_object->team = BoincTeam::lookup_id($user->teamid);
+    $cache_object->friends = array();
+
+    $friends = BoincFriend::enum("user_src=$user->id and reciprocated=1");
+    foreach($friends as $friend) {
+        $fuser = BoincUser::lookup_id($friend->user_dest);
+        if (!$fuser) continue;
+        $cache_object->friends[] = $fuser;
+    }
+    return $cache_object;
+}
+
+function community_links($clo, $logged_in_user){
+    $user = $clo->user;
+    $team = $clo->team;
+    $friends = $clo->friends;
+    $tot = $clo->post_count;
+
+    if (!DISABLE_TEAMS) {
+        if ($user->teamid && $team) {
+            row2(tra("Team"), "<a href=\"".url_base()."team_display.php?teamid=$team->id\">$team->name</a>");
+        } else {
+            row2(tra("Team"), tra("None"));
+        }
+    }
+    if (!DISABLE_FORUMS) {
+        if ($tot) {
+            row2(tra("Message boards"), "<a href=\"".url_base()."forum_user_posts.php?userid=$user->id\">".tra("%1 posts", $tot)."</a>");
+        }
+    }
+    if ($logged_in_user && $logged_in_user->id != $user->id) {
+        row2(tra("Contact"), "<a href=\"pm.php?action=new&userid=".$user->id."\">".tra("Send private message")."</a>");
+        $friend = BoincFriend::lookup($logged_in_user->id, $user->id);
+        if ($friend && $friend->reciprocated) {
+            row2(tra("This person is a friend"),
+                "<a href=\"friend.php?action=cancel_confirm&userid=$user->id\">".tra("Cancel friendship")."</a>"
+            );
+        } else if ($friend) {
+            row2(tra("Friends"),  "<a href=\"friend.php?action=add&userid=$user->id\">".tra("Request pending")."</a>");
+        } else {
+            row2(tra("Friends"),  "<a href=\"friend.php?action=add&userid=$user->id\">".tra("Add as friend")."</a>");
+        }
+    }
+
+    if ($friends) {
+        $x = "";
+        foreach($friends as $friend) {
+            $x .= friend_links($friend);
+        }
+        row2(tra("Friends")." (".sizeof($friends).")", $x);
+    }
+}
+
+function show_profile_link($user) {
+    if ($user->has_profile) {
+        row2(tra("Profile"), "<a href=\"view_profile.php?userid=$user->id\">".tra("View")."</a>");
+    }
+}
+
+function url(){
+    if(isset($_SERVER['HTTPS'])){
+        $protocol = ($_SERVER['HTTPS'] && $_SERVER['HTTPS'] != "off") ? "https" : "http";
+    }
+    else{
+        $protocol = 'http';
+    }
+    return $protocol . "://" . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'];
+}
+
+
+function row11($x, $y) {
+    echo "<tr><th colspan=2><div class=\"card\"><div class=\"card-body\">$x</div><div class=\"card-footer\" style=\"font-weight:100;\">".$y."</div></div></th></tr>\n";
+}
+
+function show_gimmefy($user) {
+   
+    //$total   = "total_score=".((string) $user->total_credit);
+    //$expavg   = "expavg_score=".((string) $user->expavg_credit);
+    //$created  = "registration_time=".((string) $user->create_time);
+    //$hosts    = BoincHost::enum("userid=$user->id");
+    //$n_hosts  = "cpus=".count($hosts);
+    //$has_android = 0;
+    //for ($i=0; $i < count($hosts); $i++) {
+        //if ($hosts[$i]->os_name === "Android") {
+            //$has_android = 1;
+        //}
+    //}
+    //$android = "has_android=".((string)$has_android);
+    //$scr_pnt = $expavg."&".$created."&".$n_hosts."&".$total."&".$android;
+
+    //$bas_url = getenv("GIMMEFY_URL");
+    //$bas_url = "http://10.0.2.15/zpg";
+    //$inf_url = $bas_url."/assets/README.html";
+    //$usr_url = $bas_url."/user/";
+    //$img_url = $usr_url.((string) $user->id)."/image?".$scr_pnt;
+    //$gnd_url = $usr_url.((string) $user->id)."/gender";
+    //$thm_url = $usr_url.((string) $user->id)."/theme";
+    //$tip_url = $usr_url.((string) $user->id)."/tip?".$scr_pnt;
+    //$lvl_url = $usr_url.((string) $user->id)."/level?".$scr_pnt;
+
+    //$resp = file_get_contents($tip_url);
+    
+    //$fact = $gnd_url."?callback=".urlencode(url());
+    //$fkek = "<a href=\"".$fact."\">Сменить</a>";
+
+    //$facc = $thm_url."?callback=".urlencode(url());
+    //$fthm = "<a href=\"".$facc."\">Сменить</a>";
+
+    //$key = "text";
+    //$resp = json_decode($resp);
+    //$tip = $resp->$key;
+
+    //$resp = file_get_contents($lvl_url);
+    //$resp = json_decode($resp);
+
+    //$key = "level";
+    //$level = $resp->$key;
+    //$key = "level_name";
+    //$level_name = $resp->$key;
+    //$key = "year";
+    //$year = $resp->$key;
+    //$key = "total_exp";
+    //$total_exp = (int) $resp->$key;
+    //$key = "until_next_level";
+    //$until_next_level = (int) $resp->$key;
+    //$key = "next_item";
+    //$next_item = $resp->$key;
+    //$key = "until_next_item";
+    //$until_next_item = (int) $resp->$key;
+    //$key = "year";
+    //$year = $resp->$key;
+    //$key = "gender";
+    //$gender = $resp->$key;
+    //$key = "theme";
+    //$theme = $resp->$key;
+    //$key = "current_streak";
+    //$current_streak = $resp->$key;
+    //$key = "max_streak";
+    //$max_streak = $resp->$key;
+    //if ($year === "") {
+        //$year = "";
+   //} else {
+        //$year = " (".$year.")";
+    //}
+    
+ ////////////////////////////////////////////////////
+ //Подключение к бд
+    
+    $servername = "localhost"; // Имя сервера базы данных (обычно "localhost")
+    $username = "kirill"; // Имя пользователя базы данных
+    $password = "Kirill15"; // Пароль пользователя базы данных
+    $dbname = "game"; // Имя базы данных
+    //$DbConn = new DbConn();
+    //$mysqli = $DbConn->init_conn("kirill","Kirill15","localhost","game","");
+    // Создаем подключение
+    $mysqli = new mysqli($servername, $username, $password, $dbname);
+    
+    
+ /////////////////////////////////////////////////////
+ 
+    $user_id = $user->id;
+    $user_credit = $user->total_credit;
+    //Получаем id картинки, который выбрад пользователь
+    $queryImageId = "SELECT id_image
+        FROM user_profile
+        WHERE id_user = $user_id";
+        
+   $result = mysqli_query($mysqli,$queryImageId); 
+   $image_id = mysqli_fetch_assoc($result)['id_image'];
+   
+   
+   //Получаем id фона картинки, который выбрал пользователь
+   $queryImageBackId = "SELECT id_background
+        FROM user_profile
+        WHERE id_user = $user_id";
+        
+   $result = mysqli_query($mysqli,$queryImageBackId); 
+   $imageback_id = mysqli_fetch_assoc($result)['id_background'];
+   
+   //Получаем id цвета персонажа картинки, который выбрал пользователь
+   $queryImageBackId = "SELECT id_character_color
+        FROM user_profile
+        WHERE id_user = $user_id";
+        
+   $result = mysqli_query($mysqli,$queryImageBackId); 
+   $imagecolor_id = mysqli_fetch_assoc($result)['id_character_color'];
+ 
+   
+   
+   //Получаем количество слоев по выбранной картинке
+   $queryLayerCount = "SELECT COUNT(DISTINCT display_order) AS unique_layers_count
+      FROM Layer
+      WHERE image_id = $image_id;";
+  $result = mysqli_query($mysqli,$queryLayerCount); 
+  $unique_layers_count = mysqli_fetch_assoc($result)['unique_layers_count'];
+
+
+
+//Делаем цикл по каждому слою
+$img_container = '<div style="position: relative;">';
+for ($i = 0; $i < $unique_layers_count -1; $i++) {
+	//Проверка исключительно для слоя - фон (в базе они идут самые первые по очередности с индексом = 0). Если у пользователя выбран уже фон, то берем его
+	if ($i == 0 && $imageback_id){
+	   $query = "SELECT image_data FROM Layer where layer_id = $imageback_id;";
+	}
+	//Проверка исключительно для слоя - цвет персонажа (в базе они идут самые вторыми по очередности с индексом = 0). Если у пользователя выбран уже фон, то берем его
+	else if ($i == 1 && $imagecolor_id){
+	    $query = "SELECT image_data FROM Layer where layer_id = $imagecolor_id;";
+	}
+	else
+	{
+	$query = "SELECT image_data
+           FROM Layer
+           WHERE image_id = $image_id
+           AND display_order = $i
+           AND point_limit = ( -- Выбираем только слои с максимальным баллом
+           SELECT MAX(point_limit)
+           FROM Layer
+           WHERE image_id = $image_id AND display_order = $i and point_limit <= $user_credit        -- Учитываем ограничение по баллам
+           )
+           ORDER BY RAND() -- Случайный порядок
+           LIMIT 1;";
+      }
+     $result = mysqli_query($mysqli,$query); 
+
+    if ($result) {
+        // Извлечение данных из результата запроса
+        $row = $result->fetch_assoc();
+        if ($row) {
+            // Вывод изображения
+            // Закодировать содержимое изображения в формат base64
+            $image_data = base64_encode($row['image_data']);
+            // Добавить изображение в HTML-контейнер
+		$img_container .= '<div style="position: absolute; top: 0; left: 0;"><img src="data:image/png;base64,'.$image_data.'" class="img" style="width:100%" border="10"></div>';
+        }
+    }
+}
+// Закрыть контейнер для наложенных изображений
+    $img_container .= '</div>';
+    // Вывести HTML-контейнер с наложенными изображениями
+    $img = $img_container;
+    
+    
+ 
+    
+    $queryImageNames = "SELECT image_id,image_name FROM image where min_points <= $user_credit;";
+        
+   $result = mysqli_query($mysqli,$queryImageNames); 
+   $select_options = '';
+   if ($result->num_rows > 0) {
+    while($row = $result->fetch_assoc()) {
+        $select_options .= '<option value="' . $row["image_id"] . '">' . $row["image_name"] . '</option>';
+    }
+} else {
+    $select_options .= '<option value="">Нет доступных изображений</option>';
+}
+
+// Создание кнопки выбора с выпадающим списком картинок
+$select_button = '<form action="" method="post">
+                    <select name="image_name">' . $select_options . '</select>
+                    <input type="submit" " value="Выбрать">
+                  </form>';
+                  
+   if ($_SERVER["REQUEST_METHOD"] == "POST") {
+    if (isset($_POST['image_name'])){
+          $selected_image = $_POST['image_name']; // поля в форме 'image_name'
+    
+          // SQL запрос для обновления информации о картинке пользователя
+          $sql = "UPDATE user_profile SET id_image=$selected_image WHERE id_user=$user_id;";
+
+    }
+    else if (isset($_POST['layer_back'])){
+          $selected_back = $_POST['layer_back']; // поля в форме 'layer_name'
+          $sql = "UPDATE user_profile SET id_background=$selected_back WHERE id_user=$user_id;";
+    }
+    else if (isset($_POST['layer_color'])){
+          $selected_color = $_POST['layer_color']; // поля в форме 'layer_name'
+          $sql = "UPDATE user_profile SET id_character_color=$selected_color WHERE id_user=$user_id;";
+    }
+    
+    
+    if (mysqli_query($mysqli, $sql) === TRUE) {
+        echo "Информация о картинке успешно обновлена";
+    } else {
+        echo "Ошибка при обновлении информации о картинке: " . $conn->error;
+    }
+}
+
+
+//Логика по созданию выбора фона
+$queryImageBack = "SELECT layer_id,layer_name FROM Layer where  point_limit <= $user_credit and display_order = 0 and image_id = $image_id;";
+        
+   $result = mysqli_query($mysqli,$queryImageBack); 
+   $select_options_back = '';
+   if ($result->num_rows > 0) {
+    while($row = $result->fetch_assoc()) {
+        $select_options_back .= '<option value="' . $row["layer_id"] . '">' . $row["layer_name"] . '</option>';
+    }
+} else {
+    $select_options .= '<option value="">Нет доступных фонов</option>';
+}
+
+
+// Создание кнопки выбора с выпадающим списком картинок
+$select_button_back = '<form action="" method="post">
+                    <select name="layer_back">' . $select_options_back . '</select>
+                    <input type="submit" value="Выбрать">
+                  </form>';
+                  
+                  
+//Логика по созданию выбора цвета
+$queryImageColor = "SELECT layer_id,layer_name FROM Layer where  point_limit <= $user_credit and display_order = 1 and image_id = $image_id;";
+        
+   $result = mysqli_query($mysqli,$queryImageColor); 
+   $select_options_color = '';
+   if ($result->num_rows > 0) {
+    while($row = $result->fetch_assoc()) {
+        $select_options_color .= '<option value="' . $row["layer_id"] . '">' . $row["layer_name"] . '</option>';
+    }
+} else {
+    $select_options .= '<option value="">Нет доступных фонов</option>';
+}
+
+
+// Создание кнопки выбора с выпадающим списком цветов персонажа
+$select_button_Color = '<form action="" method="post">
+                    <select name="layer_color">' . $select_options_color . '</select>
+                    <input type="submit" value="Выбрать">
+                  </form>';
+                 
+    
+    row1("<a name=\"prefs\"></a>".tra("Персонаж"));
+    row11($img,"");
+    
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("", "");
+    row2("Картинка",$select_button);
+    row2("Фон",$select_button_back);
+    row2("Персонаж",$select_button_Color);
+    
+    // row11($tip);
+    //row2("Уровень", ((string) $level));
+    //row2("Звание", $level_name.$year);
+    //row2("Опыт", ((string) ($total_exp))." pts");
+    //row2("До следующего уровня", ((string) ($until_next_level))." pts");
+    //row2("Следующий предмет", $next_item);
+    //row2("До следующего предмета", ((string) ($until_next_item))." pts");
+    //row2("Дней подряд", (string) ($current_streak));
+    //row2("Максимум дней подряд", (string) ($max_streak));
+    //row2("Фон", $gender." (".$fkek.")");
+    //if ($has_android) {
+        //row2("Тема", $theme." (".$fthm.")");
+    //} 
+
+    //if ($resp->total_hosts >= 2) {
+        //row2("Вы работаете с нескольких устройств", "+100 pts");
+    //}
+    //if ($max_streak >= 3) {
+        //row2("Вы заходили в игру больше 3-х дней подряд", "+25 pts");
+    //}
+    //if ($max_streak >= 7) {
+        //row2("Вы заходили в игру больше 7-и дней подряд", "+60 pts");
+    //}
+    //if ($max_streak >= 14) {
+        //row2("Вы заходили в игру больше 14-и дней подряд", "+150 pts");
+    //}
+}
+
+function show_account_private($user) {
+    grid(
+        false,
+        function() use ($user) {
+            start_table();
+            row1(tra("Account information"), 2, 'heading');
+            show_user_info_private($user);
+            show_preference_links();
+            show_user_stats_private($user);
+
+            if (function_exists('show_user_donations_private')) {
+                show_user_donations_private($user);
+            }
+
+            end_table();
+            if (!NO_COMPUTING) {
+                show_other_projects($user, true);
+            }
+            if (function_exists("project_user_page_private")) {
+                project_user_page_private($user);
+            }
+        },
+        function() use ($user) {
+            start_table();
+            show_gimmefy($user);
+            row1(tra("Community"));
+            show_community_private($user);
+            end_table();
+        }
+    );
+}
+
+
+$cvs_version_tracker[]="\$Id$";  //Generated automatically - do not edit
+
+?>
